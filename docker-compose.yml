@@ -1,0 +1,13 @@
+services:
+  app:
+    image: "${APP_NAME}:${TAG}"
+    volumes:
+      - "/var/run/docker/netns:/var/run/docker/netns:ro"
+    environment:
+      CRON: "* * * * *"
+    deploy:
+      mode: replicated
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
