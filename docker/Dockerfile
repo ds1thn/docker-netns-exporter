@@ -10,6 +10,7 @@ RUN apt-get update \
         curl=7.88.1-10+deb12u12 \
         jq=1.6-2.1 \
         util-linux=2.38.1-5+deb12u3 \
+        iproute2=6.1.0-3 \
     && rm -rf /var/lib/apt/lists/* /var/cache/debconf \
     && apt-get clean
 

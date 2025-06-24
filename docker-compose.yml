@@ -1,8 +1,11 @@
+version: '3.9'
 services:
   app:
-    image: "${APP_NAME}:${TAG}"
+    image: "pan1c/docker_netns_tcp_state:1.0.1"
+    privileged: true
     volumes:
       - "/var/run/docker/netns:/var/run/docker/netns:ro"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
     environment:
       CRON: "* * * * *"
     deploy:

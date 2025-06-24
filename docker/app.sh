@@ -18,9 +18,12 @@ NOW=$(date +%s)
 if [[ ! -f $CACHE_FILE || $(( NOW - $(stat -c %Y "$CACHE_FILE") )) -gt $CACHE_TTL ]]; then
     echo "[INFO] Обновляю кэш docker netns → container name"
     > "$CACHE_FILE"
-    for cid in $(docker ps -q); do
-        ns=$(docker inspect --format '{{.NetworkSettings.SandboxKey}}' "$cid")
-        name=$(docker inspect --format '{{.Name}}' "$cid")
+    # docker ps -q
+    for cid in $(curl -s --unix-socket /var/run/docker.sock http://localhost/v1.29/containers/json | jq -r '.[].Id'); do
+        # docker inspect --format '{{.NetworkSettings.SandboxKey}}' "$cid"
+        ns=$(curl -s --unix-socket /var/run/docker.sock http://localhost/v1.29/containers/$cid/json | jq -r '.NetworkSettings.SandboxKey')
+        # docker inspect --format '{{.Name}}' "$cid"
+        name=$(curl -s --unix-socket /var/run/docker.sock http://localhost/v1.29/containers/$cid/json | jq -r '.Name' | sed 's|^/||')
         if [[ -n "$ns" && -n "$name" ]]; then
             echo "${ns##*/} ${name#/}" >> "$CACHE_FILE"
         fi
