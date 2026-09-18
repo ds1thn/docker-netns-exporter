@@ -1,7 +1,7 @@
 version: '3.9'
 services:
   app:
-    image: "pan1c/docker_netns_tcp_state:1.0.1"
+    image: "pan1c/docker-netns-exporter:1.1.0"
     privileged: true
     volumes:
       - "/var/run/docker/netns:/var/run/docker/netns:ro"

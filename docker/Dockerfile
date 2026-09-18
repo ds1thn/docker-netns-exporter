@@ -1,16 +1,16 @@
-FROM python:3.9-slim
+FROM python:3.12-slim
 
 ENV TZ=Etc/UTC
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
-        anacron=2.3-36 \
-        cron=3.0pl1-162 \
-        curl=7.88.1-10+deb12u12 \
-        jq=1.6-2.1 \
-        util-linux=2.38.1-5+deb12u3 \
-        iproute2=6.1.0-3 \
+        anacron=2.3-43 \
+        cron=3.0pl1-197 \
+        curl=8.14.1-2+deb13u5 \
+        jq=1.7.1-6+deb13u3 \
+        util-linux=2.41.5-0+deb13u1 \
+        iproute2=6.15.0-1 \
     && rm -rf /var/lib/apt/lists/* /var/cache/debconf \
     && apt-get clean
 
