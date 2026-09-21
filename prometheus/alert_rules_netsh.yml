@@ -1,0 +1,211 @@
+---
+# Правила для метрики docker_netns_tcp_state{container,service,state}
+#
+# Требуется, чтобы экспортёр отдавал ДВА лейбла:
+#   container — полное имя задачи (redis_inst-3.1.u6rom7ah82oton460skz0my48)
+#   service   — имя сервиса без слота и хеша (redis_inst-3)
+#
+# service берётся из метки com.docker.swarm.service.name, а не вычисляется
+# регуляркой. Для compose-контейнеров метки нет — туда пишется имя контейнера.
+#
+# Recording rules не используются: выражения развёрнуты по месту.
+#
+# Разделение лейблов:
+#   container — мгновенные пороги: течёт конкретная задача, её и надо назвать
+#   service   — всё, что смотрит в прошлое (delta, offset, avg_over_time)
+#
+# Все значения округляются через printf: сокеты целые (%.0f), доли — %.2f.
+
+groups:
+  - name: netns-tcp.exporter
+    rules:
+      - alert: NETNS exporter stale
+        # 300
+        expr: time() - node_textfile_mtime_seconds{file="metrics.prom"} > 300
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "netns-exporter не обновляет метрики (instance {{ $labels.instance }})"
+          description: "metrics.prom не переписывался {{ $value | humanizeDuration }} на {{ $labels.instance }}, обычно это упавший nsenter или недоступный docker.sock (threshold: 300s)"
+          description_short: "Метрики не обновлялись {{ $value | humanizeDuration }} на {{ $labels.instance }}"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      - alert: NETNS exporter no data
+        # absent
+        expr: absent(docker_netns_tcp_state)
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Метрика docker_netns_tcp_state пропала полностью"
+          description: "Ни одной серии docker_netns_tcp_state за 10 минут: экспортёр не запускается либо textfile-коллектор смотрит не в тот каталог"
+          description_short: "Метрика docker_netns_tcp_state пропала полностью"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+  - name: netns-tcp.thresholds
+    rules:
+      # CLOSE-WAIT: приложение получило FIN, но не вызвало close().
+      # Это баг в коде, а не нагрузка — сокет висит вечно и держит fd.
+      # У clickhouse_inst_01/02 стабильно 3-4 штуки, это фон.
+      - alert: TCP close-wait leak
+        # 20
+        expr: docker_netns_tcp_state{state="CLOSE-WAIT"} > 20
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Утечка сокетов в CLOSE-WAIT (service {{ $labels.service }})"
+          description: "{{ $value | printf \"%.0f\" }} сокетов в CLOSE-WAIT у {{ $labels.container }} на {{ $labels.instance }}, приложение не закрывает соединения — обычно незакрытый клиент или пул, ведёт к исчерпанию fd (threshold: 20)"
+          description_short: "{{ $labels.service }}: {{ $value | printf \"%.0f\" }} сокетов в CLOSE-WAIT (threshold: 20)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      # TIME-WAIT держит порт источника 60 секунд. Опасно для исходящих:
+      # ip_local_port_range даёт ~28k портов на пару (dst_ip, dst_port).
+      - alert: TCP time-wait high
+        # 15000
+        expr: docker_netns_tcp_state{state="TIME-WAIT"} > 15000
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Много сокетов в TIME-WAIT (service {{ $labels.service }})"
+          description: "{{ $value | printf \"%.0f\" }} сокетов в TIME-WAIT у {{ $labels.container }} на {{ $labels.instance }}, риск исчерпания эфемерных портов — лечится keep-alive и пулом соединений (threshold: 15000)"
+          description_short: "{{ $labels.service }}: {{ $value | printf \"%.0f\" }} сокетов в TIME-WAIT (threshold: 15000)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      - alert: TCP syn-sent high
+        # 50
+        expr: docker_netns_tcp_state{state="SYN-SENT"} > 50
+        for: 5m
+        labels:
+          severity: info
+        annotations:
+          summary: "Соединения не устанавливаются (service {{ $labels.service }})"
+          description: "{{ $value | printf \"%.0f\" }} соединений висят в SYN-SENT у {{ $labels.container }} на {{ $labels.instance }}, смотрите доступность назначения, MTU и правила фильтрации (threshold: 50)"
+          description_short: "{{ $labels.service }}: {{ $value | printf \"%.0f\" }} соединений в SYN-SENT (threshold: 50)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      # LAST-ACK в норме живёт доли секунды.
+      - alert: TCP last-ack stuck
+        # 5
+        expr: docker_netns_tcp_state{state="LAST-ACK"} > 5
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Сокеты застряли в LAST-ACK (service {{ $labels.service }})"
+          description: "{{ $value | printf \"%.0f\" }} сокетов в LAST-ACK у {{ $labels.container }} на {{ $labels.instance }}, застряла отправка FIN — обычно потеря пакетов или зависший пир (threshold: 5)"
+          description_short: "{{ $labels.service }}: {{ $value | printf \"%.0f\" }} сокетов в LAST-ACK (threshold: 5)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      - alert: TCP sockets near fd limit
+        # 8000
+        expr: sum without (state) (docker_netns_tcp_state) > 8000
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Много TCP-сокетов (service {{ $labels.service }})"
+          description: "{{ $value | printf \"%.0f\" }} TCP-сокетов у {{ $labels.container }} на {{ $labels.instance }}, сравните с ulimit -n контейнера — у лимита пойдут ошибки accept/connect (threshold: 8000)"
+          description_short: "{{ $labels.service }}: {{ $value | printf \"%.0f\" }} TCP-сокетов (threshold: 8000)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+  - name: netns-tcp.trends
+    rules:
+      # Монотонный рост CLOSE-WAIT — утечка, а не всплеск.
+      - alert: TCP close-wait growing
+        # 50
+        expr: |
+          delta(
+            sum without (container) (
+              docker_netns_tcp_state{state="CLOSE-WAIT"}
+            )[1h:5m]
+          ) > 50
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "CLOSE-WAIT растёт (service {{ $labels.service }})"
+          description: "CLOSE-WAIT у {{ $labels.service }} на {{ $labels.instance }} вырос на {{ $value | printf \"%.0f\" }} за час, это утечка а не всплеск — без рестарта сервис упрётся в лимит fd (threshold: 50)"
+          description_short: "{{ $labels.service }}: CLOSE-WAIT +{{ $value | printf \"%.0f\" }} за час (threshold: 50)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      # Абсолютные пороги не работают, когда у mongodb норма 70 соединений,
+      # а у busybox одно. Сравниваем сервис сам с собой.
+      - alert: TCP established surge
+        # x5 от среднего за предыдущие 6h, но не меньше 100
+        expr: |
+          sum without (container) (docker_netns_tcp_state{state="ESTAB"})
+            >
+          5 * avg_over_time(
+                sum without (container) (
+                  docker_netns_tcp_state{state="ESTAB"}
+                )[6h:5m] offset 6h
+              )
+          and
+          sum without (container) (docker_netns_tcp_state{state="ESTAB"}) > 100
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Всплеск соединений (service {{ $labels.service }})"
+          description: "{{ $value | printf \"%.0f\" }} установленных соединений у {{ $labels.service }} на {{ $labels.instance }}, это впятеро выше среднего за предыдущие 6 часов — наплыв трафика, ретраи после сбоя или зацикленный клиент (threshold: x5)"
+          description_short: "{{ $labels.service }}: {{ $value | printf \"%.0f\" }} соединений, x5 от нормы"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+      - alert: TCP listener count changed
+        # 5
+        expr: |
+          abs(
+            sum without (container) (docker_netns_tcp_state{state="LISTEN"})
+              -
+            sum without (container) (
+              docker_netns_tcp_state{state="LISTEN"} offset 1h
+            )
+          ) > 5
+        for: 30m
+        labels:
+          severity: info
+        annotations:
+          summary: "Изменилось число слушающих портов (service {{ $labels.service }})"
+          description: "Число слушающих портов у {{ $labels.service }} на {{ $labels.instance }} отличается на {{ $value | printf \"%.0f\" }} от значения часовой давности, проверьте что порт открыт намеренно (threshold: 5)"
+          description_short: "{{ $labels.service }}: слушающих портов ±{{ $value | printf \"%.0f\" }} за час (threshold: 5)"
+          value: "{{ $value | printf \"%.0f\" }}"
+          labels: "{{ $labels }}"
+
+  # ---------------------------------------------------------------------------
+  # Пропажа слушателей — опционально
+  # ---------------------------------------------------------------------------
+  # Закомментировано намеренно: при update_config.order stop-first есть окно
+  # без слушающих сокетов на каждое обновление. Живость сервиса надёжнее
+  # ловить по up{} целей Prometheus или по состоянию Swarm.
+  #
+  # - name: netns-tcp.liveness
+  #   rules:
+  #     - alert: TCP listener gone
+  #       # 0
+  #       expr: |
+  #         sum without (container) (
+  #           docker_netns_tcp_state{state="LISTEN"} offset 1h
+  #         ) > 0
+  #         unless
+  #         sum without (container) (docker_netns_tcp_state{state="LISTEN"})
+  #       for: 15m
+  #       labels:
+  #         severity: info
+  #       annotations:
+  #         summary: "Сервис не слушает ни одного порта (service {{ $labels.service }})"
+  #         description: "Час назад у {{ $labels.service }} на {{ $labels.instance }} были слушающие сокеты, сейчас нет — процесс упал или не поднялся после рестарта"
+  #         description_short: "{{ $labels.service }} не слушает ни одного порта"
+  #         value: "{{ $value | printf \"%.0f\" }}"
+  #         labels: "{{ $labels }}"
